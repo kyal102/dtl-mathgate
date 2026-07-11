@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mathgate"
+version = "0.1.0"
+description = "Deterministic exact-arithmetic engine with replayable certificates — the model can explain the answer, it cannot override the math."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["exact-arithmetic", "verification", "ai-safety", "claim-checking", "certificates"]
+dependencies = []
+
+[project.scripts]
+mathgate = "mathgate.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["mathgate*"]

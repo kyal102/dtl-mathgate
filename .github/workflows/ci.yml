@@ -1,0 +1,47 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Tests
+        run: python -m unittest discover -s tests
+      - name: Demo runs
+        run: python -m mathgate --demo
+      - name: ProofBench-X Lite (240 seeded, oracle-graded cases)
+        run: python -m mathgate --bench
+      - name: Valid query exits 0
+        run: python -m mathgate "12*(3+4)"
+      - name: Refused query exits 1
+        shell: bash
+        run: |
+          if python -m mathgate "1/0"; then
+            echo "expected exit code 1 for a refused query"; exit 1
+          fi
+          echo "exit-code contract ok"
+      - name: Certificate is replayable (JSON hash stable across two runs)
+        shell: bash
+        run: |
+          a=$(python -m mathgate --json "12*(3+4)" | python -c "import json,sys; print(json.load(sys.stdin)['certificate_hash'])")
+          b=$(python -m mathgate --json "12*(3+4)" | python -c "import json,sys; print(json.load(sys.stdin)['certificate_hash'])")
+          if [ "$a" != "$b" ]; then echo "certificate drift: $a != $b"; exit 1; fi
+          echo "certificate replay ok: $a"
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hygiene — no private imports / secrets / unsafe subprocess
+        run: |
+          ! grep -rnE "import (app|core|modules)\b|dtl_registry|jarvi3" mathgate/ || (echo "private import" && exit 1)
+          ! grep -rniE "api[_-]?key|secret|password|ANTHROPIC" mathgate/ || (echo "secret" && exit 1)
+          ! grep -rn "shell=True" mathgate/ || (echo "unsafe subprocess" && exit 1)
+          echo "hygiene ok"
