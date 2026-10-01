@@ -1,7 +1,7 @@
 import unittest
 
 from mathgate.engine import calculate
-from mathgate.proofbench_lite import run
+from mathgate.proofbench_lite import oracle_calculate, run
 
 
 class TestEngine(unittest.TestCase):
@@ -34,6 +34,39 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(calculate("3*(-4)").result, "-12")
         self.assertEqual(calculate("(-3)*(-4)").result, "12")
         self.assertEqual(calculate("-(3*4)").result, "-12")
+
+    def test_power_precedence_and_associativity_match_independent_oracle(self):
+        for query in ("-2^2", "(-2)^2", "2^3^2", "2^-2", "-2^-2", "2*-3^2"):
+            with self.subTest(query=query):
+                result = calculate(query)
+                expected = oracle_calculate(query.replace("^", "**"))
+                self.assertEqual(result.status, "OK")
+                self.assertEqual(result.result, str(expected))
+
+    def test_large_factorial_returns_replayable_refusal(self):
+        # 5000! previously escaped calculate() as ValueError on Python >= 3.11
+        # because its rendered value exceeds the default 4300-digit limit.
+        first = calculate("5000!")
+        second = calculate("5000!")
+        self.assertEqual(first.status, "REFUSED")
+        self.assertIn("size bound", first.reason)
+        self.assertEqual(first.certificate_hash, second.certificate_hash)
+
+    def test_deep_expression_returns_refusal_instead_of_recursion_error(self):
+        for query in ("(" * 600 + "1" + ")" * 600, "-" * 2000 + "1"):
+            with self.subTest(length=len(query)):
+                result = calculate(query)
+                self.assertEqual(result.status, "REFUSED")
+                self.assertIn("parsing depth", result.reason)
+                self.assertEqual(result.certificate_hash, calculate(query).certificate_hash)
+
+    def test_work_limits_refuse_oversized_computation(self):
+        for query in ("2^1000000000", "99999^9999", "sqrt(1000000000001)", "1" * 4097):
+            with self.subTest(query=query[:50]):
+                self.assertEqual(calculate(query).status, "REFUSED")
+        # Useful large exact results and fast perfect-square checks still work.
+        self.assertEqual(calculate("2^10000").result, str(2**10000))
+        self.assertEqual(calculate("sqrt(10^20)").result, "10000000000")
 
     def test_refuses_malformed_input(self):
         self.assertEqual(calculate("1 + + * 2 )(").status, "REFUSED")

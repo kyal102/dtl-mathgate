@@ -7,10 +7,10 @@ Grammar (recursive descent, hand-written — deliberately NOT built on Python's
 implementation, not the same code checking itself):
 
     expr    := term (('+' | '-') term)*
-    term    := factor (('*' | '/') factor)*
-    factor  := unary ('^' unary)?
-    unary   := '-' unary | postfix
-    postfix := atom '!'?
+    term    := unary (('*' | '/') unary)*
+    unary   := '-' unary | power
+    power   := postfix ('^' unary)?
+    postfix := atom '!'*
     atom    := NUMBER | 'sqrt' '(' expr ')' | '(' expr ')'
 
 Every value is either an exact ``Fraction`` or a ``Sqrt`` (coefficient *
@@ -49,6 +49,20 @@ class Sqrt:
 
 
 Value = Union[Fraction, Sqrt]
+
+# Limits are part of this lite engine's supported input domain. In particular,
+# do not disable Python's process-wide integer-to-string safety limit.
+MAX_QUERY_CHARS = 4096
+MAX_VALUE_BITS = 14000
+MAX_EXPONENT = 10000
+MAX_SURD_RADICAND = 10**12
+
+
+def _bounded(v: Value) -> Value:
+    coeff = v.coeff if isinstance(v, Sqrt) else v
+    if max(coeff.numerator.bit_length(), coeff.denominator.bit_length()) > MAX_VALUE_BITS:
+        raise Refused("exact value exceeds this lite engine's 14000-bit size bound")
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -134,15 +148,15 @@ class _Parser:
         return val
 
     def _term(self) -> Value:
-        val = self._factor()
+        val = self._unary()
         while self._peek() and self._peek()[0] in ("*", "/"):
             op = self._advance()[0]
-            rhs = self._factor()
+            rhs = self._unary()
             val = _mul(val, rhs) if op == "*" else _div(val, rhs)
         return val
 
-    def _factor(self) -> Value:
-        val = self._unary()
+    def _power(self) -> Value:
+        val = self._postfix()
         if self._peek() and self._peek()[0] == "^":
             self._advance()
             exp = self._unary()
@@ -153,7 +167,7 @@ class _Parser:
         if self._peek() and self._peek()[0] == "-":
             self._advance()
             return _neg(self._unary())
-        return self._postfix()
+        return self._power()
 
     def _postfix(self) -> Value:
         val = self._atom()
@@ -186,7 +200,7 @@ class _Parser:
 def _num(text: str) -> Fraction:
     if text.count(".") > 1:
         raise Refused(f"malformed number '{text}'")
-    return Fraction(text)
+    return _bounded(Fraction(text))
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +212,11 @@ def _simplify_sqrt(coeff: Fraction, radicand: int) -> Value:
         raise Refused("sqrt of a negative number is not real-exact in this engine")
     if radicand == 0:
         return Fraction(0)
+    root = math.isqrt(radicand)
+    if root * root == radicand:
+        return _bounded(coeff * root)
+    if radicand > MAX_SURD_RADICAND:
+        raise Refused("non-square radicand exceeds this lite engine's factorization bound (10^12)")
     extracted = 1
     r = radicand
     d = 2
@@ -206,7 +225,7 @@ def _simplify_sqrt(coeff: Fraction, radicand: int) -> Value:
             r //= d * d
             extracted *= d
         d += 1
-    coeff = coeff * extracted
+    coeff = _bounded(coeff * extracted)
     if r == 1:
         return coeff
     return Sqrt(coeff, r)
@@ -228,7 +247,7 @@ def _neg(v: Value) -> Value:
 
 def _add(a: Value, b: Value) -> Value:
     if isinstance(a, Fraction) and isinstance(b, Fraction):
-        return a + b
+        return _bounded(a + b)
     a_rad = a.radicand if isinstance(a, Sqrt) else 1
     b_rad = b.radicand if isinstance(b, Sqrt) else 1
     if a_rad != b_rad:
@@ -243,7 +262,7 @@ def _add(a: Value, b: Value) -> Value:
 
 def _mul(a: Value, b: Value) -> Value:
     if isinstance(a, Fraction) and isinstance(b, Fraction):
-        return a * b
+        return _bounded(a * b)
     a_rad = a.radicand if isinstance(a, Sqrt) else 1
     a_coeff = a.coeff if isinstance(a, Sqrt) else a
     b_rad = b.radicand if isinstance(b, Sqrt) else 1
@@ -257,8 +276,8 @@ def _div(a: Value, b: Value) -> Value:
             raise Refused("division by zero")
         raise Refused("division by a symbolic surd is out of scope for this lite engine")
     if isinstance(a, Sqrt):
-        return Sqrt(a.coeff / b, a.radicand)
-    return a / b
+        return _bounded(Sqrt(a.coeff / b, a.radicand))
+    return _bounded(a / b)
 
 
 def _pow(base: Value, exp: Value) -> Value:
@@ -267,6 +286,8 @@ def _pow(base: Value, exp: Value) -> Value:
     if exp.denominator != 1:
         raise Refused("non-integer exponent is out of scope for this lite engine (would not be exact)")
     e = int(exp)
+    if abs(e) > MAX_EXPONENT:
+        raise Refused("exponent exceeds this lite engine's magnitude bound (10000)")
     if isinstance(base, Sqrt):
         if e < 0:
             raise Refused("negative exponent on a symbolic surd is out of scope for this lite engine")
@@ -278,11 +299,16 @@ def _pow(base: Value, exp: Value) -> Value:
         if base == 0:
             raise Refused("0^0 is undefined")
         return Fraction(1)
+    # Refuse oversized powers before allocating them. This lower bound is
+    # conservative; the exact result is checked again after computation.
+    base_bits = max(base.numerator.bit_length(), base.denominator.bit_length())
+    if (base_bits - 1) * abs(e) + 1 > MAX_VALUE_BITS:
+        raise Refused("exact power exceeds this lite engine's 14000-bit size bound")
     if e > 0:
-        return base ** e
+        return _bounded(base ** e)
     if base == 0:
         raise Refused("division by zero (negative exponent of 0)")
-    return Fraction(1) / (base ** (-e))
+    return _bounded(Fraction(1) / (base ** (-e)))
 
 
 def _factorial(v: Value) -> Value:
@@ -293,7 +319,7 @@ def _factorial(v: Value) -> Value:
         raise Refused("factorial of a negative number is undefined")
     if n > 5000:
         raise Refused("factorial argument too large for this lite engine's safety bound (5000)")
-    return Fraction(math.factorial(n))
+    return _bounded(Fraction(math.factorial(n)))
 
 
 # ---------------------------------------------------------------------------
@@ -343,20 +369,25 @@ def _certificate(query: str, status: str, result: str) -> str:
 
 
 def calculate(query: str) -> Result:
-    """Evaluate ``query`` exactly. Never raises — malformed/out-of-scope
+    """Evaluate a string ``query`` exactly. Malformed/out-of-scope
     input comes back as a ``Result`` with ``status == "REFUSED"``, sealed
     with the same certificate scheme as a successful result, so a refusal
     is just as replayable and auditable as an answer."""
     normalized = query.strip()
     try:
+        if len(normalized) > MAX_QUERY_CHARS:
+            raise Refused("expression exceeds this lite engine's length bound (4096 characters)")
         tokens = _tokenize(normalized)
         value = _Parser(tokens).parse()
+        rendered = _render(value)
     except Refused as exc:
         cert = _certificate(normalized, "REFUSED", "")
         return Result(normalized, "REFUSED", "", "", str(exc), cert)
     except (ZeroDivisionError, ValueError, OverflowError) as exc:
         cert = _certificate(normalized, "REFUSED", "")
         return Result(normalized, "REFUSED", "", "", f"invalid expression: {exc}", cert)
-    rendered = _render(value)
+    except RecursionError:
+        cert = _certificate(normalized, "REFUSED", "")
+        return Result(normalized, "REFUSED", "", "", "expression nesting exceeds this runtime's safe parsing depth", cert)
     cert = _certificate(normalized, "OK", rendered)
     return Result(normalized, "OK", rendered, _exactness(value), "", cert)

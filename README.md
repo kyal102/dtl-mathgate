@@ -47,6 +47,12 @@ factorial — hand-written recursive-descent parser, graded by an independently
 implemented `ast`-based oracle (`mathgate/proofbench_lite.py`), 240 seeded
 cases, 0 failures, 0 certificate drift, reproducible by anyone.
 
+Those 240 cases are a public development suite: 192 exact answers and 48 expected
+refusals. The separate oracle cross-checks the tested expressions; this is not an
+independent third-party evaluation or an official leaderboard result. Targeted
+regression tests also cover power precedence, nesting, and computation bounds.
+See [the supported limits](docs/LIMITATIONS.md) before using untrusted expressions.
+
 The **hosted SuperMath Lab** (symbolic calculus, linear algebra, proof mode,
 and the full 1,116-case ProofBench X corpus) is proprietary and lives at
 [jvi3.com/packages#tab-supermath](https://jvi3.com/packages#tab-supermath),
